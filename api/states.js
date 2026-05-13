@@ -37,9 +37,15 @@ module.exports = async (req, res) => {
     }
   }
 
-  // Recuperation des credentials OpenSky
-  const oskyUser = process.env.OPENSKY_USER;
-  const oskyPass = process.env.OPENSKY_PASS;
+  // Recuperation des credentials OpenSky (trim pour eviter les espaces parasites)
+  const oskyUser = (process.env.OPENSKY_USER || '').trim();
+  const oskyPass = (process.env.OPENSKY_PASS || '').trim();
+
+  if (!oskyUser || !oskyPass) {
+    return res.status(500).json({
+      error: 'Variables d\'environnement OPENSKY_USER ou OPENSKY_PASS manquantes ou vides sur Vercel. Verifie Settings > Environment Variables, puis redeploie.'
+    });
+  }
 
   // Construction de la query string a partir des params recus
   const params = req.query || {};
@@ -61,20 +67,21 @@ module.exports = async (req, res) => {
 
   // Appel OpenSky
   const openSkyUrl = `https://opensky-network.org/api/states/all?${queryStr}`;
-  const headers = { 'Accept': 'application/json' };
-  if (oskyUser && oskyPass) {
-    const auth = Buffer.from(`${oskyUser}:${oskyPass}`).toString('base64');
-    headers['Authorization'] = `Basic ${auth}`;
-  }
+  const auth = Buffer.from(`${oskyUser}:${oskyPass}`).toString('base64');
+  const headers = {
+    'Accept': 'application/json',
+    'Authorization': `Basic ${auth}`,
+    'User-Agent': 'flight-tracker-opensky/1.0'
+  };
 
   try {
     const response = await fetch(openSkyUrl, { headers });
     if (!response.ok) {
       const text = await response.text().catch(() => '');
+      const snippet = text.slice(0, 300).replace(/\s+/g, ' ');
+      console.error('[states] OpenSky non-OK', response.status, response.statusText, snippet);
       return res.status(response.status).json({
-        error: `OpenSky HTTP ${response.status}`,
-        statusText: response.statusText,
-        details: text.slice(0, 300)
+        error: `OpenSky HTTP ${response.status} ${response.statusText}${snippet ? ' — ' + snippet : ''}`
       });
     }
     const data = await response.json();
@@ -87,6 +94,9 @@ module.exports = async (req, res) => {
     res.setHeader('X-Cache', 'MISS');
     return res.status(200).json(data);
   } catch (err) {
-    return res.status(500).json({ error: 'Erreur lors du fetch OpenSky', details: err.message });
+    console.error('[states] fetch threw', err);
+    return res.status(500).json({
+      error: `Echec du fetch vers OpenSky : ${err && err.message ? err.message : String(err)}`
+    });
   }
 };
