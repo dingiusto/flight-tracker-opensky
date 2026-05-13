@@ -86,9 +86,13 @@ module.exports = async (req, res) => {
     res.setHeader('X-Cache', 'MISS');
     return res.status(200).json(data);
   } catch (err) {
-    console.error('[tracks] fetch threw', err);
+    const cause = err.cause;
+    const causeMsg = cause
+      ? ` → ${cause.message || String(cause)}${cause.code ? ' [' + cause.code + ']' : ''}`
+      : '';
+    console.error('[tracks] fetch threw', err.message, 'cause:', cause);
     return res.status(500).json({
-      error: `Echec du fetch vers OpenSky : ${err && err.message ? err.message : String(err)}`
+      error: `Echec du fetch vers OpenSky : ${err.message || String(err)}${causeMsg}`
     });
   }
 };

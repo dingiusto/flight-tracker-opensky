@@ -94,9 +94,14 @@ module.exports = async (req, res) => {
     res.setHeader('X-Cache', 'MISS');
     return res.status(200).json(data);
   } catch (err) {
-    console.error('[states] fetch threw', err);
+    // Extraire err.cause pour avoir le vrai message sous-jacent (ECONNREFUSED, ENOTFOUND, etc.)
+    const cause = err.cause;
+    const causeMsg = cause
+      ? ` → ${cause.message || String(cause)}${cause.code ? ' [' + cause.code + ']' : ''}`
+      : '';
+    console.error('[states] fetch threw', err.message, 'cause:', cause);
     return res.status(500).json({
-      error: `Echec du fetch vers OpenSky : ${err && err.message ? err.message : String(err)}`
+      error: `Echec du fetch vers OpenSky : ${err.message || String(err)}${causeMsg}`
     });
   }
 };
