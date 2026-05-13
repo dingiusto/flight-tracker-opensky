@@ -1,0 +1,9 @@
+{
+  "name": "flight-tracker-opensky",
+  "version": "1.0.0",
+  "description": "Visualiseur de trajectoires de vols OpenSky — déploiement Vercel",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}

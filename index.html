@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight Tracker — OpenSky Historical</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2128;
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.15);
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --accent: #ef4444;
+    --accent2: #f97316;
+    --accent3: #a78bfa;
+    --blue: #3b82f6;
+    --green: #22c55e;
+    --font-ui: 'Syne', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-ui); overflow: hidden; }
+
+  #shell { display: grid; grid-template-rows: 52px 1fr; grid-template-columns: 320px 1fr; height: 100vh; }
+
+  /* Header */
+  header {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .logo { font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; display: flex; align-items: center; gap: 10px; }
+  .logo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+  .header-right { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+  #status-pill { padding: 3px 10px; border-radius: 20px; background: var(--surface2); border: 1px solid var(--border2); font-size: 11px; }
+  #status-pill.loading { border-color: var(--blue); color: var(--blue); }
+  #status-pill.ok { border-color: var(--green); color: var(--green); }
+  #status-pill.error { border-color: var(--accent); color: var(--accent); }
+
+  /* Sidebar */
+  aside {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+    padding: 16px;
+    gap: 20px;
+  }
+  .section-title { font-size: 10px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+
+  .info-block { background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px; padding: 12px; }
+  .info-block p { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; font-family: var(--font-mono); }
+  input[type=text], input[type=password], input[type=date], select {
+    width: 100%; padding: 8px 10px;
+    background: var(--bg); border: 1px solid var(--border2); border-radius: 6px;
+    color: var(--text); font-family: var(--font-mono); font-size: 12px;
+    outline: none; margin-bottom: 8px;
+  }
+  input:focus, select:focus { border-color: var(--blue); }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  button {
+    width: 100%; padding: 9px 14px; border-radius: 6px;
+    font-family: var(--font-ui); font-size: 13px; font-weight: 600;
+    cursor: pointer; border: none; transition: opacity 0.15s, transform 0.1s;
+  }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border2); margin-top: 6px; }
+  .btn-secondary:hover:not(:disabled) { background: var(--border2); }
+  .btn-export { background: var(--accent3); color: #fff; margin-top: 6px; }
+  .btn-export:hover:not(:disabled) { opacity: 0.85; }
+
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .stat-val { font-size: 22px; font-weight: 700; font-family: var(--font-mono); color: var(--text); }
+  .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; margin-top: 2px; }
+
+  .legend { display: flex; flex-direction: column; gap: 7px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .legend-line { width: 28px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+
+  .log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-family: var(--font-mono); font-size: 10px; color: var(--muted); max-height: 120px; overflow-y: auto; line-height: 1.7; }
+  .log-line { color: var(--muted); }
+  .log-line.info { color: var(--blue); }
+  .log-line.ok { color: var(--green); }
+  .log-line.err { color: var(--accent); }
+
+  /* Map */
+  #map-container { position: relative; }
+  #map { width: 100%; height: 100%; background: #0d1520; }
+  .leaflet-tile-pane { filter: brightness(0.5) saturate(0.4) hue-rotate(200deg); }
+
+  .map-overlay {
+    position: absolute; top: 10px; right: 10px; z-index: 999;
+    background: rgba(13,17,23,0.9); border: 1px solid var(--border2);
+    border-radius: 8px; padding: 10px 14px; font-size: 11px;
+    font-family: var(--font-mono); color: var(--muted); max-width: 200px;
+  }
+  .map-overlay strong { color: var(--text); display: block; margin-bottom: 4px; font-size: 12px; }
+
+  #tooltip {
+    position: absolute; z-index: 1000; pointer-events: none;
+    background: rgba(13,17,23,0.95); border: 1px solid var(--border2);
+    border-radius: 8px; padding: 10px 14px; font-size: 11px;
+    font-family: var(--font-mono); color: var(--text); display: none;
+    min-width: 180px;
+  }
+  #tooltip .tt-cs { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  #tooltip .tt-row { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); }
+  #tooltip .tt-row span:last-child { color: var(--text); }
+
+  .progress-bar {
+    height: 2px; background: var(--border);
+    border-radius: 1px; overflow: hidden; margin-top: 8px; display: none;
+  }
+  .progress-inner { height: 100%; background: var(--blue); transition: width 0.3s; border-radius: 1px; }
+
+  /* Modal mot de passe */
+  #pw-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(13,17,23,0.96);
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(6px);
+  }
+  #pw-overlay.hidden { display: none; }
+  .pw-card {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 12px;
+    padding: 32px;
+    max-width: 380px; width: 90%;
+    text-align: center;
+  }
+  .pw-card h1 {
+    font-size: 18px; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; margin-bottom: 8px;
+  }
+  .pw-card p {
+    font-size: 12px; color: var(--muted); margin-bottom: 20px;
+  }
+  .pw-card input {
+    text-align: center; font-size: 14px; padding: 10px; margin-bottom: 14px;
+  }
+  .pw-error {
+    color: var(--accent); font-size: 11px; font-family: var(--font-mono);
+    margin-top: 8px; min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Ecran de saisie du mot de passe -->
+<div id="pw-overlay">
+  <div class="pw-card">
+    <h1>Flight Tracker</h1>
+    <p>Acces protege. Entre le mot de passe pour continuer.</p>
+    <input type="password" id="pw-input" placeholder="Mot de passe" autocomplete="off">
+    <button class="btn-primary" id="pw-btn" onclick="checkPassword()">Entrer</button>
+    <div class="pw-error" id="pw-error"></div>
+  </div>
+</div>
+
+<div id="shell">
+
+  <header>
+    <div class="logo">
+      <div class="logo-dot"></div>
+      Flight Tracker — OpenSky Historical
+    </div>
+    <div class="header-right">
+      <span id="status-pill">En attente</span>
+      <span id="header-count" style="display:none;"></span>
+    </div>
+  </header>
+
+  <aside>
+    <!-- Info source -->
+    <div>
+      <div class="section-title">Source de donnees</div>
+      <div class="info-block">
+        <p>Donnees OpenSky Network, recuperees via un backend proxy (les identifiants ne sont jamais exposes au navigateur). Cache 1h pour economiser le quota.</p>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div>
+      <div class="section-title">Parametres</div>
+      <label>Region</label>
+      <select id="region">
+        <option value="me">Moyen-Orient</option>
+        <option value="eu">Europe</option>
+        <option value="na">Amerique du Nord</option>
+        <option value="asia">Asie du Sud-Est</option>
+        <option value="af">Afrique</option>
+        <option value="custom">Zone personnalisee</option>
+      </select>
+
+      <div id="custom-bbox" style="display:none;">
+        <label>BBox : minLon, minLat, maxLon, maxLat</label>
+        <input type="text" id="bbox-input" placeholder="ex: 24,12,62,42">
+      </div>
+
+      <div class="row2">
+        <div>
+          <label>Date debut</label>
+          <input type="date" id="date-from">
+        </div>
+        <div>
+          <label>Date fin</label>
+          <input type="date" id="date-to">
+        </div>
+      </div>
+
+      <label>Limite de vols</label>
+      <select id="limit">
+        <option value="50">50 vols</option>
+        <option value="100" selected>100 vols</option>
+        <option value="200">200 vols</option>
+        <option value="500">500 vols (lent)</option>
+      </select>
+
+      <div class="progress-bar" id="progress-wrap">
+        <div class="progress-inner" id="progress" style="width:0%"></div>
+      </div>
+
+      <button class="btn-primary" id="btn-load" onclick="loadFlights()">Charger les vols</button>
+      <button class="btn-secondary" id="btn-clear" onclick="clearMap()">Effacer</button>
+      <button class="btn-export" id="btn-export" onclick="exportGeoJSON()" disabled>Exporter GeoJSON</button>
+    </div>
+
+    <!-- Stats -->
+    <div>
+      <div class="section-title">Statistiques</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-val" id="s-total">—</div><div class="stat-lbl">Vols</div></div>
+        <div class="stat-card"><div class="stat-val" id="s-tracked">—</div><div class="stat-lbl">Traces</div></div>
+        <div class="stat-card"><div class="stat-val" id="s-countries">—</div><div class="stat-lbl">Pays</div></div>
+        <div class="stat-card"><div class="stat-val" id="s-dist">—</div><div class="stat-lbl">Dist moy km</div></div>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div>
+      <div class="section-title">Legende</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-line" style="background:#ef4444;"></div> Depart de la region</div>
+        <div class="legend-item"><div class="legend-line" style="background:#3b82f6;"></div> Arrivee dans la region</div>
+        <div class="legend-item"><div class="legend-line" style="background:#f97316;"></div> Transit</div>
+        <div class="legend-item"><div class="legend-line" style="background:#a78bfa;opacity:0.5;"></div> Trace partiel</div>
+      </div>
+    </div>
+
+    <!-- Log -->
+    <div>
+      <div class="section-title">Journal</div>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+
+  <div id="map-container">
+    <div id="map"></div>
+    <div class="map-overlay">
+      <strong id="region-label">Moyen-Orient</strong>
+      <div id="period-label" style="color:var(--muted);font-size:10px;"></div>
+    </div>
+    <div id="tooltip"></div>
+  </div>
+
+</div>
+
+<script>
+// ── Regions ──────────────────────────────────────────────────────────────────
+const REGIONS = {
+  me:   { name: "Moyen-Orient",      bbox: [24,12,62,42],   center:[27,32],   zoom:4 },
+  eu:   { name: "Europe",            bbox: [-11,34,42,72],  center:[15,52],   zoom:4 },
+  na:   { name: "Amerique du Nord",  bbox: [-130,18,-55,56],center:[-95,38],  zoom:3 },
+  asia: { name: "Asie du Sud-Est",   bbox: [93,-1,145,28],  center:[115,13],  zoom:4 },
+  af:   { name: "Afrique",           bbox: [-20,-36,55,38], center:[20,5],    zoom:3 },
+  custom:{ name:"Zone personnalisee",bbox:[0,0,10,10],      center:[5,5],     zoom:4 }
+};
+
+const TYPE_COLORS = { depart:'#ef4444', arrivee:'#3b82f6', transit:'#f97316', partial:'#a78bfa' };
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let map, layerGroup;
+let flightFeatures = [];
+let regionKey = 'me';
+let SITE_PASSWORD = sessionStorage.getItem('site_pw') || '';
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  // Map init
+  map = L.map('map', { zoomControl: true, attributionControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap | OpenSky Network',
+    maxZoom: 14
+  }).addTo(map);
+  layerGroup = L.layerGroup().addTo(map);
+
+  const r = REGIONS[regionKey];
+  map.setView(r.center, r.zoom);
+
+  // Default dates: yesterday - 2 days ago
+  const today = new Date();
+  const t2 = new Date(today); t2.setDate(t2.getDate()-2);
+  const t1 = new Date(today); t1.setDate(t1.getDate()-3);
+  document.getElementById('date-from').value = fmtDate(t1);
+  document.getElementById('date-to').value   = fmtDate(t2);
+
+  document.getElementById('region').addEventListener('change', e => {
+    regionKey = e.target.value;
+    document.getElementById('region-label').textContent = REGIONS[regionKey].name;
+    document.getElementById('custom-bbox').style.display = e.target.value === 'custom' ? 'block' : 'none';
+    const rg = REGIONS[regionKey];
+    if (e.target.value !== 'custom') map.setView(rg.center, rg.zoom);
+  });
+
+  // Validation du mot de passe deja en session ?
+  if (SITE_PASSWORD) {
+    verifyStoredPassword();
+  } else {
+    document.getElementById('pw-input').focus();
+  }
+
+  // Submit on Enter
+  document.getElementById('pw-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') checkPassword();
+  });
+});
+
+// ── Password gate ─────────────────────────────────────────────────────────────
+async function verifyStoredPassword() {
+  try {
+    const resp = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: SITE_PASSWORD })
+    });
+    if (resp.ok) {
+      hidePasswordOverlay();
+    } else {
+      SITE_PASSWORD = '';
+      sessionStorage.removeItem('site_pw');
+      document.getElementById('pw-input').focus();
+    }
+  } catch (e) {
+    document.getElementById('pw-input').focus();
+  }
+}
+
+async function checkPassword() {
+  const input = document.getElementById('pw-input').value.trim();
+  const errEl = document.getElementById('pw-error');
+  errEl.textContent = '';
+  if (!input) {
+    errEl.textContent = 'Saisis un mot de passe';
+    return;
+  }
+  document.getElementById('pw-btn').disabled = true;
+  try {
+    const resp = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: input })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      SITE_PASSWORD = input;
+      sessionStorage.setItem('site_pw', input);
+      hidePasswordOverlay();
+    } else {
+      errEl.textContent = 'Mot de passe invalide';
+    }
+  } catch (e) {
+    errEl.textContent = 'Erreur reseau : ' + e.message;
+  } finally {
+    document.getElementById('pw-btn').disabled = false;
+  }
+}
+
+function hidePasswordOverlay() {
+  document.getElementById('pw-overlay').classList.add('hidden');
+  setTimeout(() => map.invalidateSize(), 100);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmtDate(d) {
+  return d.toISOString().split('T')[0];
+}
+
+function toUnix(dateStr) {
+  return Math.floor(new Date(dateStr).getTime() / 1000);
+}
+
+function log(msg, type='') {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'log-line ' + type;
+  line.textContent = '[' + new Date().toLocaleTimeString('fr-FR') + '] ' + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(text, cls='') {
+  const el = document.getElementById('status-pill');
+  el.textContent = text;
+  el.className = cls;
+}
+
+function setProgress(pct) {
+  document.getElementById('progress').style.width = pct + '%';
+}
+
+function getBbox() {
+  if (regionKey === 'custom') {
+    const parts = document.getElementById('bbox-input').value.split(',').map(Number);
+    if (parts.length === 4 && parts.every(n => !isNaN(n))) return parts;
+    alert('BBox invalide. Format : minLon,minLat,maxLon,maxLat'); return null;
+  }
+  return REGIONS[regionKey].bbox;
+}
+
+function haversine(lon1,lat1,lon2,lat2) {
+  const R=6371, dLat=(lat2-lat1)*Math.PI/180, dLon=(lon2-lon1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// ── API proxy ─────────────────────────────────────────────────────────────────
+async function apiFetch(endpoint, params) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== undefined && v !== null && v !== '') sp.append(k, String(v));
+  }
+  const url = `/api/${endpoint}?${sp.toString()}`;
+  const resp = await fetch(url, {
+    headers: { 'x-site-password': SITE_PASSWORD }
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.json()).error || ''; } catch (_) {}
+    throw new Error(`HTTP ${resp.status} ${resp.statusText}${detail ? ' — ' + detail : ''}`);
+  }
+  return resp.json();
+}
+
+async function getFlightTrack(icao24, beginTime) {
+  try {
+    return await apiFetch('tracks', { icao24, time: beginTime });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function getFlightsInArea(bbox, begin, end) {
+  // OpenSky : on echantillonne /states/all toutes les 24h sur la plage,
+  // pour collecter les icao24 uniques.
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const aircraft = new Map();
+  const step = 86400; // 1 jour
+  const windows = [];
+  for (let t = begin; t < end; t += step) windows.push(t);
+  if (windows.length === 0) windows.push(begin);
+  log(`Fenetres de temps a sonder : ${windows.length}`, 'info');
+
+  for (let i = 0; i < windows.length; i++) {
+    setProgress(Math.round((i / windows.length) * 50));
+    try {
+      const data = await apiFetch('states', {
+        time: windows[i],
+        lamin: minLat, lomin: minLon, lamax: maxLat, lomax: maxLon
+      });
+      if (data && data.states) {
+        data.states.forEach(s => {
+          const icao = s[0];
+          if (!aircraft.has(icao)) {
+            aircraft.set(icao, {
+              icao24: icao,
+              callsign: (s[1] || '').trim(),
+              origin_country: s[2],
+              lon: s[5],
+              lat: s[6],
+              alt: s[7],
+              velocity: s[9],
+              heading: s[10],
+              seenAt: windows[i]
+            });
+          }
+        });
+      }
+    } catch (e) {
+      log(`Erreur fenetre ${i+1}: ${e.message}`, 'err');
+    }
+    await sleep(300);
+  }
+  return [...aircraft.values()];
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Main load ─────────────────────────────────────────────────────────────────
+async function loadFlights() {
+  if (!SITE_PASSWORD) { alert('Authentification requise.'); return; }
+
+  const bbox = getBbox();
+  if (!bbox) return;
+
+  const dateFrom = document.getElementById('date-from').value;
+  const dateTo   = document.getElementById('date-to').value;
+  if (!dateFrom || !dateTo) { alert('Selectionne une plage de dates.'); return; }
+
+  const begin = toUnix(dateFrom);
+  const end   = toUnix(dateTo) + 86399;
+  const limit = parseInt(document.getElementById('limit').value);
+
+  clearMap();
+  document.getElementById('btn-load').disabled = true;
+  document.getElementById('btn-export').disabled = true;
+  document.getElementById('progress-wrap').style.display = 'block';
+  setStatus('Chargement…', 'loading');
+  log(`Region : ${REGIONS[regionKey].name}`, 'info');
+  log(`Periode : ${dateFrom} -> ${dateTo}`);
+  log(`BBox : ${bbox.join(', ')}`);
+
+  document.getElementById('period-label').textContent = `${dateFrom} → ${dateTo}`;
+
+  try {
+    log('Recuperation des aeronefs dans la zone…', 'info');
+    const aircraft = await getFlightsInArea(bbox, begin, end);
+    log(`${aircraft.length} aeronefs detectes`, 'ok');
+    document.getElementById('s-total').textContent = aircraft.length;
+
+    const toFetch = aircraft.slice(0, limit);
+    log(`Recuperation des traces pour ${toFetch.length} aeronefs…`, 'info');
+
+    let tracked = 0, totalDist = 0;
+    const countries = new Set();
+    flightFeatures = [];
+
+    for (let i = 0; i < toFetch.length; i++) {
+      setProgress(50 + Math.round((i / toFetch.length) * 50));
+      const ac = toFetch[i];
+      const track = await getFlightTrack(ac.icao24, ac.seenAt);
+
+      if (track && track.path && track.path.length > 1) {
+        const coords = track.path.map(p => [p[2], p[1]]); // [lon, lat]
+        const latlngs = track.path.map(p => [p[1], p[2]]);
+
+        // Determine color by relation to bbox
+        const [minLon, minLat, maxLon, maxLat] = bbox;
+        const firstPt = track.path[0];
+        const lastPt  = track.path[track.path.length-1];
+        const startIn = firstPt[2]>=minLon&&firstPt[2]<=maxLon&&firstPt[1]>=minLat&&firstPt[1]<=maxLat;
+        const endIn   = lastPt[2]>=minLon&&lastPt[2]<=maxLon&&lastPt[1]>=minLat&&lastPt[1]<=maxLat;
+        let flightType = 'transit';
+        if (startIn && !endIn) flightType = 'depart';
+        else if (!startIn && endIn) flightType = 'arrivee';
+        else if (startIn && endIn) flightType = 'transit';
+        else flightType = 'partial';
+
+        const color = TYPE_COLORS[flightType];
+        const dist = haversine(coords[0][0], coords[0][1], coords[coords.length-1][0], coords[coords.length-1][1]);
+        totalDist += dist;
+
+        if (ac.origin_country) countries.add(ac.origin_country);
+
+        const polyline = L.polyline(latlngs, {
+          color, weight: 1.2, opacity: 0.6, smoothFactor: 1
+        }).addTo(layerGroup);
+
+        polyline.on('mouseover', function(e) { showTooltip(e, ac, flightType, dist); });
+        polyline.on('mouseout', hideTooltip);
+        polyline.on('mousemove', moveTooltip);
+
+        flightFeatures.push({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: coords },
+          properties: {
+            icao24: ac.icao24,
+            callsign: ac.callsign || 'N/A',
+            origin_country: ac.origin_country || 'N/A',
+            flight_type: flightType,
+            altitude_m: ac.alt,
+            velocity_ms: ac.velocity,
+            distance_km: Math.round(dist),
+            color
+          }
+        });
+
+        tracked++;
+        document.getElementById('s-tracked').textContent = tracked;
+        document.getElementById('s-countries').textContent = countries.size;
+        if (tracked > 0) document.getElementById('s-dist').textContent = Math.round(totalDist / tracked).toLocaleString('fr-FR');
+        document.getElementById('header-count').style.display = '';
+        document.getElementById('header-count').textContent = `${tracked} traces`;
+      }
+      await sleep(200);
+    }
+
+    setStatus(`${tracked} traces`, 'ok');
+    log(`Termine : ${tracked} traces charges`, 'ok');
+    document.getElementById('btn-export').disabled = flightFeatures.length === 0;
+
+    if (flightFeatures.length > 0) {
+      const [minLon, minLat, maxLon, maxLat] = bbox;
+      map.fitBounds([[minLat, minLon],[maxLat, maxLon]], { padding:[20,20] });
+    }
+
+  } catch (e) {
+    setStatus('Erreur', 'error');
+    log(`Erreur : ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    document.getElementById('btn-load').disabled = false;
+    document.getElementById('progress-wrap').style.display = 'none';
+    setProgress(0);
+  }
+}
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+function showTooltip(e, ac, type, dist) {
+  const tt = document.getElementById('tooltip');
+  const typeLabels = { depart:'Depart zone', arrivee:'Arrivee zone', transit:'Transit', partial:'Partiel' };
+  tt.innerHTML = `
+    <div class="tt-cs">${ac.callsign || ac.icao24}</div>
+    <div class="tt-row"><span>Pays</span><span>${ac.origin_country||'?'}</span></div>
+    <div class="tt-row"><span>Type</span><span>${typeLabels[type]}</span></div>
+    <div class="tt-row"><span>Distance</span><span>${Math.round(dist)} km</span></div>
+    <div class="tt-row"><span>Altitude</span><span>${ac.alt ? Math.round(ac.alt)+' m' : '?'}</span></div>
+    <div class="tt-row"><span>Vitesse</span><span>${ac.velocity ? Math.round(ac.velocity*3.6)+' km/h' : '?'}</span></div>
+  `;
+  tt.style.display = 'block';
+  moveTooltip(e);
+}
+
+function moveTooltip(e) {
+  const tt = document.getElementById('tooltip');
+  const wrap = document.getElementById('map-container');
+  const rect = wrap.getBoundingClientRect();
+  let x = e.originalEvent.clientX - rect.left + 12;
+  let y = e.originalEvent.clientY - rect.top + 12;
+  if (x + 200 > rect.width) x -= 210;
+  tt.style.left = x + 'px';
+  tt.style.top  = y + 'px';
+}
+
+function hideTooltip() {
+  document.getElementById('tooltip').style.display = 'none';
+}
+
+// ── Clear ─────────────────────────────────────────────────────────────────────
+function clearMap() {
+  layerGroup.clearLayers();
+  flightFeatures = [];
+  ['s-total','s-tracked','s-countries','s-dist'].forEach(id => document.getElementById(id).textContent = '—');
+  document.getElementById('header-count').style.display = 'none';
+  document.getElementById('btn-export').disabled = true;
+  setStatus('En attente', '');
+}
+
+// ── Export GeoJSON ────────────────────────────────────────────────────────────
+function exportGeoJSON() {
+  if (!flightFeatures.length) return;
+  const bbox = getBbox();
+  const dateFrom = document.getElementById('date-from').value;
+  const dateTo   = document.getElementById('date-to').value;
+
+  const geojson = {
+    type: 'FeatureCollection',
+    metadata: {
+      source: 'OpenSky Network',
+      region: REGIONS[regionKey].name,
+      bbox,
+      dateFrom,
+      dateTo,
+      total_tracks: flightFeatures.length,
+      generated: new Date().toISOString()
+    },
+    features: flightFeatures
+  };
+
+  const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/geo+json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `opensky_${regionKey}_${dateFrom}_${dateTo}.geojson`;
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`GeoJSON exporte : ${flightFeatures.length} traces`, 'ok');
+}
+</script>
+</body>
+</html>
