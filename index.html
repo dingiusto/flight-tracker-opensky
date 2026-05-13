@@ -8,6 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
 <style>
   :root {
     --bg: #0d1117;
@@ -85,6 +87,9 @@
   .btn-secondary:hover:not(:disabled) { background: var(--border2); }
   .btn-export { background: var(--accent3); color: #fff; margin-top: 6px; }
   .btn-export:hover:not(:disabled) { opacity: 0.85; }
+  .btn-draw { background: var(--surface2); color: var(--accent3); border: 1px solid var(--accent3); margin-bottom: 8px; }
+  .btn-draw:hover:not(:disabled):not(.drawing) { background: rgba(167,139,250,0.12); }
+  .btn-draw.drawing { background: var(--accent3); color: #fff; }
 
   .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .stat-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
@@ -211,8 +216,10 @@
         <option value="custom">Zone personnalisee</option>
       </select>
 
+      <button class="btn-draw" id="btn-draw" onclick="toggleDraw()">✏ Dessiner une zone sur la carte</button>
+
       <div id="custom-bbox" style="display:none;">
-        <label>BBox : minLon, minLat, maxLon, maxLat</label>
+        <label>Coordonnées de la zone (minLon, minLat, maxLon, maxLat)</label>
         <input type="text" id="bbox-input" placeholder="ex: 24,12,62,42">
       </div>
 
@@ -298,7 +305,7 @@ const REGIONS = {
 const TYPE_COLORS = { depart:'#ef4444', arrivee:'#3b82f6', transit:'#f97316', partial:'#a78bfa' };
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let map, layerGroup;
+let map, layerGroup, drawnItems, drawHandler;
 let flightFeatures = [];
 let regionKey = 'me';
 let SITE_PASSWORD = sessionStorage.getItem('site_pw') || '';
@@ -312,6 +319,33 @@ window.addEventListener('DOMContentLoaded', () => {
     maxZoom: 14
   }).addTo(map);
   layerGroup = L.layerGroup().addTo(map);
+
+  // Leaflet.Draw — calque pour le rectangle dessiné
+  drawnItems = L.featureGroup().addTo(map);
+  map.on(L.Draw.Event.CREATED, function(e) {
+    drawnItems.clearLayers();
+    drawnItems.addLayer(e.layer);
+
+    const bounds = e.layer.getBounds();
+    const minLat = bounds.getSouth().toFixed(3);
+    const maxLat = bounds.getNorth().toFixed(3);
+    const minLon = bounds.getWest().toFixed(3);
+    const maxLon = bounds.getEast().toFixed(3);
+
+    // Passer en mode "Zone personnalisée"
+    document.getElementById('region').value = 'custom';
+    regionKey = 'custom';
+    document.getElementById('region-label').textContent = 'Zone personnalisée';
+    document.getElementById('custom-bbox').style.display = 'block';
+    document.getElementById('bbox-input').value = `${minLon},${minLat},${maxLon},${maxLat}`;
+    log(`Zone dessinée : ${minLon},${minLat} → ${maxLon},${maxLat}`, 'ok');
+
+    // Réinitialiser le bouton
+    const btn = document.getElementById('btn-draw');
+    btn.textContent = '✏ Dessiner une zone sur la carte';
+    btn.classList.remove('drawing');
+    drawHandler = null;
+  });
 
   const r = REGIONS[regionKey];
   map.setView(r.center, r.zoom);
@@ -328,7 +362,10 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('region-label').textContent = REGIONS[regionKey].name;
     document.getElementById('custom-bbox').style.display = e.target.value === 'custom' ? 'block' : 'none';
     const rg = REGIONS[regionKey];
-    if (e.target.value !== 'custom') map.setView(rg.center, rg.zoom);
+    if (e.target.value !== 'custom') {
+      map.setView(rg.center, rg.zoom);
+      if (drawnItems) drawnItems.clearLayers(); // Effacer le rectangle dessiné si on change de région
+    }
   });
 
   // Validation du mot de passe deja en session ?
@@ -397,6 +434,33 @@ async function checkPassword() {
 function hidePasswordOverlay() {
   document.getElementById('pw-overlay').classList.add('hidden');
   setTimeout(() => map.invalidateSize(), 100);
+}
+
+// ── Draw bbox ─────────────────────────────────────────────────────────────────
+function toggleDraw() {
+  const btn = document.getElementById('btn-draw');
+  if (drawHandler) {
+    // Annuler le dessin en cours
+    drawHandler.disable();
+    drawHandler = null;
+    btn.textContent = '✏ Dessiner une zone sur la carte';
+    btn.classList.remove('drawing');
+  } else {
+    // Lancer le dessin d'un rectangle
+    drawHandler = new L.Draw.Rectangle(map, {
+      shapeOptions: {
+        color: '#a78bfa',
+        weight: 2,
+        opacity: 0.9,
+        fillOpacity: 0.12,
+        dashArray: '6,4'
+      }
+    });
+    drawHandler.enable();
+    btn.textContent = '✕ Annuler le dessin';
+    btn.classList.add('drawing');
+    log('Clique-glisse sur la carte pour délimiter la zone…', 'info');
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -667,6 +731,7 @@ function hideTooltip() {
 // ── Clear ─────────────────────────────────────────────────────────────────────
 function clearMap() {
   layerGroup.clearLayers();
+  if (drawnItems) drawnItems.clearLayers();
   flightFeatures = [];
   ['s-total','s-tracked','s-countries','s-dist'].forEach(id => document.getElementById(id).textContent = '—');
   document.getElementById('header-count').style.display = 'none';
