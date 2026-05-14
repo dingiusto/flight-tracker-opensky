@@ -1,98 +1,104 @@
-// Proxy serverless Vercel vers OpenSky /tracks/all
-// Memes principes que states.js : cache 1h + Basic Auth + check mot de passe site
+// Proxy Edge Runtime Vercel → OpenSky /tracks/all
+// Edge Runtime = réseau Cloudflare → contourne le blocage AWS d'OpenSky
+// Mêmes principes que states.js : cache best-effort + Basic Auth + check mot de passe site
+
+export const config = { runtime: 'edge' };
 
 const cache = new Map();
-const CACHE_TTL_MS = 60 * 60 * 1000;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 heure
 
-function pruneCache() {
-  const now = Date.now();
-  for (const [k, v] of cache.entries()) {
-    if (v.expires < now) cache.delete(k);
-  }
-  if (cache.size > 1000) {
-    const oldestKey = cache.keys().next().value;
-    cache.delete(oldestKey);
-  }
-}
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'x-site-password, Content-Type',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+};
 
-module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'x-site-password, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-
+export default async function handler(req) {
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    return new Response(null, { status: 200, headers: CORS });
   }
 
+  // Vérification mot de passe site
   const sitePassword = process.env.SITE_PASSWORD;
   if (sitePassword) {
-    const provided = req.headers['x-site-password'];
+    const provided = req.headers.get('x-site-password');
     if (provided !== sitePassword) {
-      return res.status(401).json({ error: 'Mot de passe site invalide ou absent' });
+      return Response.json(
+        { error: 'Mot de passe site invalide ou absent' },
+        { status: 401, headers: CORS }
+      );
     }
   }
 
+  // Credentials OpenSky
   const oskyUser = (process.env.OPENSKY_USER || '').trim();
   const oskyPass = (process.env.OPENSKY_PASS || '').trim();
 
   if (!oskyUser || !oskyPass) {
-    return res.status(500).json({
-      error: 'Variables d\'environnement OPENSKY_USER ou OPENSKY_PASS manquantes ou vides sur Vercel.'
+    return Response.json(
+      { error: "Variables d'environnement OPENSKY_USER ou OPENSKY_PASS manquantes ou vides sur Vercel." },
+      { status: 500, headers: CORS }
+    );
+  }
+
+  // Récupération des query params depuis l'URL
+  const { searchParams } = new URL(req.url);
+  const queryStr = searchParams.toString();
+  const cacheKey = `tracks:${queryStr}`;
+
+  // Vérif cache
+  const now = Date.now();
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expires > now) {
+    return Response.json(cached.data, {
+      headers: { ...CORS, 'X-Cache': 'HIT', 'Cache-Control': 's-maxage=3600, stale-while-revalidate=7200' },
     });
   }
 
-  const params = req.query || {};
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') sp.append(k, String(v));
-  }
-  const queryStr = sp.toString();
-  const cacheKey = `tracks:${queryStr}`;
-
-  pruneCache();
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    res.setHeader('X-Cache', 'HIT');
-    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=7200');
-    return res.status(200).json(cached.data);
-  }
-
-  const openSkyUrl = `https://opensky-network.org/api/tracks/all?${queryStr}`;
-  const auth = Buffer.from(`${oskyUser}:${oskyPass}`).toString('base64');
-  const headers = {
-    'Accept': 'application/json',
-    'Authorization': `Basic ${auth}`,
-    'User-Agent': 'flight-tracker-opensky/1.0'
-  };
+  // Appel OpenSky
+  const openSkyUrl = `https://opensky-network.org/api/tracks/all${queryStr ? '?' + queryStr : ''}`;
+  const auth = btoa(`${oskyUser}:${oskyPass}`);
 
   try {
-    const response = await fetch(openSkyUrl, { headers });
+    const response = await fetch(openSkyUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Basic ${auth}`,
+        'User-Agent': 'flight-tracker-opensky/1.0',
+      },
+    });
+
     if (!response.ok) {
-      // 404 frequent sur /tracks/all si l'avion n'a pas de track dispo : on renvoie null calmement
+      // 404 fréquent sur /tracks/all si l'avion n'a pas de track dispo : on renvoie null calmement
       if (response.status === 404) {
-        return res.status(200).json(null);
+        return Response.json(null, { status: 200, headers: CORS });
       }
       const text = await response.text().catch(() => '');
       const snippet = text.slice(0, 300).replace(/\s+/g, ' ');
-      console.error('[tracks] OpenSky non-OK', response.status, response.statusText, snippet);
-      return res.status(response.status).json({
-        error: `OpenSky HTTP ${response.status} ${response.statusText}${snippet ? ' — ' + snippet : ''}`
-      });
+      return Response.json(
+        { error: `OpenSky HTTP ${response.status} ${response.statusText}${snippet ? ' — ' + snippet : ''}` },
+        { status: response.status, headers: CORS }
+      );
     }
+
     const data = await response.json();
 
-    cache.set(cacheKey, { data, expires: Date.now() + CACHE_TTL_MS });
-    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=7200');
-    res.setHeader('X-Cache', 'MISS');
-    return res.status(200).json(data);
+    // Mise en cache
+    cache.set(cacheKey, { data, expires: now + CACHE_TTL_MS });
+    // Nettoyage basique si trop d'entrées
+    if (cache.size > 1000) cache.delete(cache.keys().next().value);
+
+    return Response.json(data, {
+      headers: { ...CORS, 'Cache-Control': 's-maxage=3600, stale-while-revalidate=7200', 'X-Cache': 'MISS' },
+    });
   } catch (err) {
     const cause = err.cause;
     const causeMsg = cause
       ? ` → ${cause.message || String(cause)}${cause.code ? ' [' + cause.code + ']' : ''}`
       : '';
-    console.error('[tracks] fetch threw', err.message, 'cause:', cause);
-    return res.status(500).json({
-      error: `Echec du fetch vers OpenSky : ${err.message || String(err)}${causeMsg}`
-    });
+    return Response.json(
+      { error: `Échec du fetch vers OpenSky : ${err.message || String(err)}${causeMsg}` },
+      { status: 500, headers: CORS }
+    );
   }
-};
+}
