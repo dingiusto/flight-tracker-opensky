@@ -199,7 +199,7 @@
     <div>
       <div class="section-title">Source de donnees</div>
       <div class="info-block">
-        <p>Donnees OpenSky Network, recuperees via un backend proxy (les identifiants ne sont jamais exposes au navigateur). Cache 1h pour economiser le quota.</p>
+        <p>Donnees <strong>adsb.fi</strong> (ADS-B communautaire, libre). Vols en direct — instantane de la zone au moment du chargement. Cache 1 min.</p>
       </div>
     </div>
 
@@ -223,15 +223,8 @@
         <input type="text" id="bbox-input" placeholder="ex: 24,12,62,42">
       </div>
 
-      <div class="row2">
-        <div>
-          <label>Date debut</label>
-          <input type="date" id="date-from">
-        </div>
-        <div>
-          <label>Date fin</label>
-          <input type="date" id="date-to">
-        </div>
+      <div class="info-block" style="margin-bottom:8px;">
+        <p style="color:var(--green);font-family:var(--font-mono);font-size:11px;">⬤ MODE LIVE — donnees en temps reel</p>
       </div>
 
       <label>Limite de vols</label>
@@ -349,13 +342,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const r = REGIONS[regionKey];
   map.setView(r.center, r.zoom);
-
-  // Default dates: yesterday - 2 days ago
-  const today = new Date();
-  const t2 = new Date(today); t2.setDate(t2.getDate()-2);
-  const t1 = new Date(today); t1.setDate(t1.getDate()-3);
-  document.getElementById('date-from').value = fmtDate(t1);
-  document.getElementById('date-to').value   = fmtDate(t2);
 
   document.getElementById('region').addEventListener('change', e => {
     regionKey = e.target.value;
@@ -524,55 +510,49 @@ async function apiFetch(endpoint, params) {
   return resp.json();
 }
 
-async function getFlightTrack(icao24, beginTime) {
+async function getFlightTrack(icao24) {
   try {
-    return await apiFetch('tracks', { icao24, time: beginTime });
+    return await apiFetch('tracks', { icao24 });
   } catch (e) {
     return null;
   }
 }
 
-async function getFlightsInArea(bbox, begin, end) {
-  // OpenSky : on echantillonne /states/all toutes les 24h sur la plage,
-  // pour collecter les icao24 uniques.
+async function getFlightsInArea(bbox) {
+  // adsb.fi : un seul appel, données en direct (pas de fenêtres temporelles).
   const [minLon, minLat, maxLon, maxLat] = bbox;
   const aircraft = new Map();
-  const step = 86400; // 1 jour
-  const windows = [];
-  for (let t = begin; t < end; t += step) windows.push(t);
-  if (windows.length === 0) windows.push(begin);
-  log(`Fenetres de temps a sonder : ${windows.length}`, 'info');
 
-  for (let i = 0; i < windows.length; i++) {
-    setProgress(Math.round((i / windows.length) * 50));
-    try {
-      const data = await apiFetch('states', {
-        time: windows[i],
-        lamin: minLat, lomin: minLon, lamax: maxLat, lomax: maxLon
+  log('Recuperation des vols en direct (adsb.fi)…', 'info');
+  setProgress(25);
+
+  try {
+    const data = await apiFetch('states', {
+      lamin: minLat, lomin: minLon, lamax: maxLat, lomax: maxLon
+    });
+    if (data && data.states) {
+      data.states.forEach(s => {
+        const icao = s[0];
+        if (icao && !aircraft.has(icao)) {
+          aircraft.set(icao, {
+            icao24: icao,
+            callsign: (s[1] || '').trim(),
+            origin_country: s[2] || '',
+            lon: s[5],
+            lat: s[6],
+            alt: s[7],
+            velocity: s[9],
+            heading: s[10],
+            seenAt: Math.floor(Date.now() / 1000)
+          });
+        }
       });
-      if (data && data.states) {
-        data.states.forEach(s => {
-          const icao = s[0];
-          if (!aircraft.has(icao)) {
-            aircraft.set(icao, {
-              icao24: icao,
-              callsign: (s[1] || '').trim(),
-              origin_country: s[2],
-              lon: s[5],
-              lat: s[6],
-              alt: s[7],
-              velocity: s[9],
-              heading: s[10],
-              seenAt: windows[i]
-            });
-          }
-        });
-      }
-    } catch (e) {
-      log(`Erreur fenetre ${i+1}: ${e.message}`, 'err');
     }
-    await sleep(300);
+  } catch (e) {
+    log(`Erreur recuperation vols : ${e.message}`, 'err');
   }
+
+  setProgress(50);
   return [...aircraft.values()];
 }
 
@@ -585,13 +565,8 @@ async function loadFlights() {
   const bbox = getBbox();
   if (!bbox) return;
 
-  const dateFrom = document.getElementById('date-from').value;
-  const dateTo   = document.getElementById('date-to').value;
-  if (!dateFrom || !dateTo) { alert('Selectionne une plage de dates.'); return; }
-
-  const begin = toUnix(dateFrom);
-  const end   = toUnix(dateTo) + 86399;
   const limit = parseInt(document.getElementById('limit').value);
+  const now = new Date().toLocaleString('fr-FR');
 
   clearMap();
   document.getElementById('btn-load').disabled = true;
@@ -599,15 +574,13 @@ async function loadFlights() {
   document.getElementById('progress-wrap').style.display = 'block';
   setStatus('Chargement…', 'loading');
   log(`Region : ${REGIONS[regionKey].name}`, 'info');
-  log(`Periode : ${dateFrom} -> ${dateTo}`);
   log(`BBox : ${bbox.join(', ')}`);
 
-  document.getElementById('period-label').textContent = `${dateFrom} → ${dateTo}`;
+  document.getElementById('period-label').textContent = `Live — ${now}`;
 
   try {
-    log('Recuperation des aeronefs dans la zone…', 'info');
-    const aircraft = await getFlightsInArea(bbox, begin, end);
-    log(`${aircraft.length} aeronefs detectes`, 'ok');
+    const aircraft = await getFlightsInArea(bbox);
+    log(`${aircraft.length} aeronefs detectes en direct`, 'ok');
     document.getElementById('s-total').textContent = aircraft.length;
 
     const toFetch = aircraft.slice(0, limit);
@@ -620,7 +593,7 @@ async function loadFlights() {
     for (let i = 0; i < toFetch.length; i++) {
       setProgress(50 + Math.round((i / toFetch.length) * 50));
       const ac = toFetch[i];
-      const track = await getFlightTrack(ac.icao24, ac.seenAt);
+      const track = await getFlightTrack(ac.icao24);
 
       if (track && track.path && track.path.length > 1) {
         const coords = track.path.map(p => [p[2], p[1]]); // [lon, lat]
