@@ -59,14 +59,20 @@ export default async function handler(req) {
   const openSkyUrl = `https://opensky-network.org/api/tracks/all${queryStr ? '?' + queryStr : ''}`;
   const auth = btoa(`${oskyUser}:${oskyPass}`);
 
+  // Timeout explicite : 24s (Vercel Edge a une limite de 25s max)
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 24000);
+
   try {
     const response = await fetch(openSkyUrl, {
+      signal: ac.signal,
       headers: {
         'Accept': 'application/json',
         'Authorization': `Basic ${auth}`,
         'User-Agent': 'flight-tracker-opensky/1.0',
       },
     });
+    clearTimeout(timer);
 
     if (!response.ok) {
       // 404 fréquent sur /tracks/all si l'avion n'a pas de track dispo : on renvoie null calmement
@@ -92,6 +98,13 @@ export default async function handler(req) {
       headers: { ...CORS, 'Cache-Control': 's-maxage=3600, stale-while-revalidate=7200', 'X-Cache': 'MISS' },
     });
   } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      return Response.json(
+        { error: 'OpenSky ne répond pas dans les délais (timeout 24s). Le serveur est peut-être surchargé ou bloque les requêtes.' },
+        { status: 504, headers: CORS }
+      );
+    }
     const cause = err.cause;
     const causeMsg = cause
       ? ` → ${cause.message || String(cause)}${cause.code ? ' [' + cause.code + ']' : ''}`
