@@ -1,17 +1,30 @@
-// Proxy Edge Runtime Vercel → OpenSky /states/all
-// Edge Runtime = réseau Cloudflare → contourne le blocage AWS d'OpenSky
-// Cache Map best-effort (partagé dans une même instance Edge, pas garanti entre invocations)
+// Proxy Edge Runtime Vercel → adsb.fi /api/v2/ (données live)
+// Remplace OpenSky qui bloque les IPs Vercel (AWS et Cloudflare).
+// adsb.fi est une source communautaire ADS-B libre, sans blocage IP.
+// Renvoie les données au format OpenSky-compatible pour ne pas modifier le frontend.
 
 export const config = { runtime: 'edge' };
 
 const cache = new Map();
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 heure
+const CACHE_TTL_MS = 60 * 1000; // 1 minute (données live)
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'x-site-password, Content-Type',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
 };
+
+// Distance en km entre deux points géographiques
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
@@ -30,83 +43,97 @@ export default async function handler(req) {
     }
   }
 
-  // Credentials OpenSky
-  const oskyUser = (process.env.OPENSKY_USER || '').trim();
-  const oskyPass = (process.env.OPENSKY_PASS || '').trim();
-
-  if (!oskyUser || !oskyPass) {
-    return Response.json(
-      { error: "Variables d'environnement OPENSKY_USER ou OPENSKY_PASS manquantes ou vides sur Vercel. Vérifie Settings > Environment Variables, puis redéploie." },
-      { status: 500, headers: CORS }
-    );
-  }
-
-  // Récupération des query params depuis l'URL
   const { searchParams } = new URL(req.url);
-  const queryStr = searchParams.toString();
-  const cacheKey = `states:${queryStr}`;
+  const lamin = parseFloat(searchParams.get('lamin') || '0');
+  const lomin = parseFloat(searchParams.get('lomin') || '0');
+  const lamax = parseFloat(searchParams.get('lamax') || '0');
+  const lomax = parseFloat(searchParams.get('lomax') || '0');
 
-  // Vérif cache
+  // Clé de cache basée sur la bbox (arrondie au 0.5° pour mutualiser les requêtes proches)
+  const cacheKey = `states:${lamin.toFixed(1)},${lomin.toFixed(1)},${lamax.toFixed(1)},${lomax.toFixed(1)}`;
   const now = Date.now();
   const cached = cache.get(cacheKey);
   if (cached && cached.expires > now) {
     return Response.json(cached.data, {
-      headers: { ...CORS, 'X-Cache': 'HIT', 'Cache-Control': 's-maxage=3600, stale-while-revalidate=7200' },
+      headers: { ...CORS, 'X-Cache': 'HIT' },
     });
   }
 
-  // Appel OpenSky
-  const openSkyUrl = `https://opensky-network.org/api/states/all${queryStr ? '?' + queryStr : ''}`;
-  const auth = btoa(`${oskyUser}:${oskyPass}`);
+  // Convertir la bbox en centre + rayon pour l'API adsb.fi
+  const centerLat = (lamin + lamax) / 2;
+  const centerLon = (lomin + lomax) / 2;
+  // Rayon = distance du centre au coin, en miles nautiques (API adsb.fi), cap 500nm
+  const radiusKm = haversineKm(centerLat, centerLon, lamin, lomin);
+  const radiusNm = Math.min(Math.ceil(radiusKm * 0.539957), 500);
 
-  // Timeout explicite : 24s (Vercel Edge a une limite de 25s max)
+  const adsbUrl = `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(4)}/lon/${centerLon.toFixed(4)}/dist/${radiusNm}`;
+
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 24000);
+  const timer = setTimeout(() => ac.abort(), 20000);
 
   try {
-    const response = await fetch(openSkyUrl, {
+    const response = await fetch(adsbUrl, {
       signal: ac.signal,
       headers: {
         'Accept': 'application/json',
-        'Authorization': `Basic ${auth}`,
-        'User-Agent': 'flight-tracker-opensky/1.0',
+        'User-Agent': 'flight-tracker/2.0',
       },
     });
     clearTimeout(timer);
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      const snippet = text.slice(0, 300).replace(/\s+/g, ' ');
       return Response.json(
-        { error: `OpenSky HTTP ${response.status} ${response.statusText}${snippet ? ' — ' + snippet : ''}` },
+        { error: `adsb.fi HTTP ${response.status} — ${text.slice(0, 200)}` },
         { status: response.status, headers: CORS }
       );
     }
 
     const data = await response.json();
 
-    // Mise en cache
-    cache.set(cacheKey, { data, expires: now + CACHE_TTL_MS });
-    // Nettoyage basique si trop d'entrées
-    if (cache.size > 500) cache.delete(cache.keys().next().value);
+    // Convertir au format OpenSky + filtrer sur la bbox exacte (le rayon déborde les coins)
+    const states = (data.ac || [])
+      .filter(a =>
+        a.lat != null && a.lon != null &&
+        a.lat >= lamin && a.lat <= lamax &&
+        a.lon >= lomin && a.lon <= lomax
+      )
+      .map(a => [
+        (a.hex || '').toLowerCase(),                                      // 0  icao24
+        (a.flight || '').trim(),                                          // 1  callsign
+        '',                                                               // 2  origin_country (non dispo)
+        null,                                                             // 3  time_position
+        null,                                                             // 4  last_contact
+        a.lon,                                                            // 5  longitude
+        a.lat,                                                            // 6  latitude
+        a.alt_baro != null ? Math.round(a.alt_baro * 0.3048) : null,     // 7  baro_altitude ft→m
+        a.alt_baro != null && a.alt_baro <= 50,                          // 8  on_ground
+        a.gs != null ? Math.round(a.gs * 0.514444 * 10) / 10 : null,    // 9  velocity kts→m/s
+        a.track ?? null,                                                  // 10 heading (degrés)
+        a.baro_rate != null ? Math.round(a.baro_rate * 0.00508 * 10) / 10 : null, // 11 vert_rate ft/min→m/s
+        null, null,                                                       // 12-13
+        a.squawk ?? null,                                                 // 14 squawk
+        false, 0                                                          // 15-16
+      ]);
 
-    return Response.json(data, {
-      headers: { ...CORS, 'Cache-Control': 's-maxage=3600, stale-while-revalidate=7200', 'X-Cache': 'MISS' },
+    const result = { time: Math.floor(now / 1000), states };
+
+    cache.set(cacheKey, { data: result, expires: now + CACHE_TTL_MS });
+    if (cache.size > 300) cache.delete(cache.keys().next().value);
+
+    return Response.json(result, {
+      headers: { ...CORS, 'X-Cache': 'MISS' },
     });
   } catch (err) {
     clearTimeout(timer);
     if (err.name === 'AbortError') {
       return Response.json(
-        { error: 'OpenSky ne répond pas dans les délais (timeout 24s). Le serveur est peut-être surchargé ou bloque les requêtes.' },
+        { error: 'adsb.fi ne répond pas dans les délais (timeout 20s).' },
         { status: 504, headers: CORS }
       );
     }
-    const cause = err.cause;
-    const causeMsg = cause
-      ? ` → ${cause.message || String(cause)}${cause.code ? ' [' + cause.code + ']' : ''}`
-      : '';
     return Response.json(
-      { error: `Échec du fetch vers OpenSky : ${err.message || String(err)}${causeMsg}` },
+      { error: `Échec du fetch vers adsb.fi : ${err.message || String(err)}` },
       { status: 500, headers: CORS }
     );
   }
